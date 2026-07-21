@@ -8,8 +8,8 @@ Duas formas de uso, complementares:
 
 | | Onde roda | Formatos aceitos | Como usar |
 |---|---|---|---|
-| [`word-macro/`](word-macro/) | Dentro do Word (Windows) | `.docx` (documento aberto) | Um clique no Word, gera um novo documento com a análise |
-| [`python/`](python/) | Terminal | `.docx` e `.pdf` | `python analisar_contrato.py contrato.pdf` |
+| [`word-macro/`](word-macro/) | Dentro do Word (Windows **e** Mac) | `.docx` (documento aberto) | Um clique no Word, gera um novo documento com a análise |
+| [`python/`](python/) | Terminal (Windows, Mac ou Linux) | `.docx` e `.pdf` | `python analisar_contrato.py contrato.pdf` |
 
 As duas usam o mesmo roteiro de análise (mesmos critérios jurídicos verificados),
 implementado separadamente em cada linguagem — veja `python/contract_analyzer/prompt.py`
@@ -28,10 +28,11 @@ cláusula/trecho relacionado, o problema identificado e uma sugestão de ajuste.
 
 ## Por onde começar
 
-- Só precisa analisar `.docx` direto no Word, sem instalar Python? Vá para
-  [`word-macro/INSTALACAO.md`](word-macro/INSTALACAO.md).
+- Só precisa analisar `.docx` direto no Word, sem instalar Python?
+  Vá para [`word-macro/INSTALACAO.md`](word-macro/INSTALACAO.md) (Windows) ou
+  [`word-macro/INSTALACAO_MAC.md`](word-macro/INSTALACAO_MAC.md) (Mac).
 - Precisa analisar PDFs, ou rodar vários contratos em lote pelo terminal? Vá para
-  [`python/README.md`](python/README.md).
+  [`python/README.md`](python/README.md) (funciona igual em Windows, Mac e Linux).
 
 Em ambos os casos você vai precisar de uma chave de API da Anthropic
 (https://console.anthropic.com/settings/keys), que é paga por uso.

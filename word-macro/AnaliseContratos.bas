@@ -9,11 +9,20 @@ Option Explicit
 ' melhoria/ajuste) e monta um NOVO documento do Word com o resultado
 ' formatado. O documento original nunca é alterado.
 '
-' Instalação: veja INSTALACAO.md nesta mesma pasta.
+' Funciona em Word para Windows e Word para Mac (Office 2016 ou mais
+' recente) a partir do MESMO arquivo: a chamada HTTP é a única parte que
+' muda por plataforma (Windows usa WinHttp; Mac usa curl via AppleScript,
+' já que não existe WinHttp/ADODB no Mac) - ver os blocos "#If Mac Then"
+' mais abaixo. Todo o resto do código (prompts, parsing, montagem do
+' relatório) é o mesmo nas duas plataformas.
+'
+' Instalação:
+'  - Windows: veja INSTALACAO.md nesta mesma pasta.
+'  - Mac: veja INSTALACAO_MAC.md nesta mesma pasta.
 '
 ' Uso: com um contrato aberto no Word, rode a macro AnalisarContratoAtual
-' (Alt+F8 -> AnalisarContratoAtual -> Executar), ou associe-a a um botão
-' na Barra de Ferramentas de Acesso Rápido.
+' (Alt+F8 no Windows, ou Ferramentas > Macro > Macros no Mac), ou associe-a
+' a um botão na Barra de Ferramentas de Acesso Rápido.
 ' =====================================================================
 
 Public Const MODEL_NAME As String = "claude-sonnet-4-5-20250929"
@@ -105,7 +114,7 @@ Private Function ObterChaveAPI() As String
         chave = InputBox( _
             "Informe sua chave de API da Anthropic (começa com 'sk-ant-')." & vbCrLf & vbCrLf & _
             "Você pode gerar uma em: https://console.anthropic.com/settings/keys" & vbCrLf & vbCrLf & _
-            "Ela ficará salva no seu perfil do Windows e não será pedida de novo " & _
+            "Ela ficará salva no seu perfil deste computador e não será pedida de novo " & _
             "(use a macro RedefinirChaveAPI para trocá-la no futuro).", _
             "Chave de API - Anthropic")
         chave = Trim(chave)
@@ -133,8 +142,102 @@ End Function
 
 
 ' ---------------------------------------------------------------------
-' Chamada à API da Anthropic
+' Chamada à API da Anthropic (implementação específica por plataforma)
 ' ---------------------------------------------------------------------
+
+#If Mac Then
+
+' --- Versão Mac: não existem WinHttp/ADODB no Word para Mac, então a
+' chamada HTTP é feita via "curl" (já vem instalado em todo macOS),
+' disparado através de AppleScript (MacScript/"do shell script"), que é
+' a forma padrão de fazer requisições de rede a partir de VBA no Mac.
+Private Function ChamarClaudeAPI(apiKey As String, nomeArquivo As String, textoContrato As String) As String
+    Dim jsonBody As String
+    jsonBody = "{""model"":""" & MODEL_NAME & """," & _
+               """max_tokens"":" & MAX_TOKENS & "," & _
+               """system"":""" & EscaparJSON(GerarSystemPrompt()) & """," & _
+               """messages"":[{""role"":""user"",""content"":""" & _
+               EscaparJSON(GerarUserPrompt(nomeArquivo, textoContrato)) & """}]}"
+
+    Dim q As String
+    q = Chr(34) ' aspas duplas - usada para montar o comando com clareza,
+                ' em vez de sequências densas de "" dentro da string
+
+    ' Cria uma pasta temporária exclusiva via shell e grava a requisição
+    ' em arquivo, em vez de embutir o contrato inteiro na linha de
+    ' comando (evita estourar limites de tamanho de linha de comando).
+    Dim pastaTemp As String
+    pastaTemp = MacScript("do shell script " & q & "mktemp -d" & q)
+
+    Dim caminhoRequest As String, caminhoResponse As String
+    caminhoRequest = pastaTemp & "/request.json"
+    caminhoResponse = pastaTemp & "/response.json"
+
+    Dim nFile As Integer
+    nFile = FreeFile
+    Open caminhoRequest For Output As #nFile
+    Print #nFile, jsonBody
+    Close #nFile
+
+    ' "-w '%{http_code}'" faz o curl devolver o status HTTP como saída do
+    ' "do shell script" (o corpo da resposta vai para o arquivo via -o).
+    Dim comandoAS As String
+    comandoAS = "do shell script " & q & _
+        "curl -s --max-time 180 -o '" & caminhoResponse & "' -w '%{http_code}' " & _
+        "-X POST " & API_URL & " " & _
+        "-H 'x-api-key: " & apiKey & "' " & _
+        "-H 'anthropic-version: " & ANTHROPIC_VERSION & "' " & _
+        "-H 'content-type: application/json' " & _
+        "--data-binary @'" & caminhoRequest & "'" & q
+
+    Dim statusCode As String
+    statusCode = MacScript(comandoAS)
+
+    Dim respostaTexto As String
+    respostaTexto = LerArquivoTexto(caminhoResponse)
+
+    On Error Resume Next
+    Kill caminhoRequest
+    Kill caminhoResponse
+    MacScript "do shell script " & q & "rmdir '" & pastaTemp & "'" & q
+    On Error GoTo 0
+
+    If statusCode <> "200" Then
+        Err.Raise vbObjectError + 1, , _
+            "A API respondeu com erro " & statusCode & ":" & vbCrLf & respostaTexto & vbCrLf & vbCrLf & _
+            "Verifique sua chave de API (rode RedefinirChaveAPI para trocá-la), sua conexão " & _
+            "com a internet e as permissões de Automação do Word em Ajustes do Sistema > " & _
+            "Privacidade e Segurança > Automação. Se o erro mencionar o nome do modelo, " & _
+            "atualize a constante MODEL_NAME no topo deste módulo " & _
+            "(veja https://docs.anthropic.com/en/docs/about-claude/models)."
+    End If
+
+    Dim conteudo As String
+    conteudo = ExtrairCampoTexto(respostaTexto)
+    If conteudo = "" Then
+        Err.Raise vbObjectError + 2, , "Não foi possível interpretar a resposta da API:" & vbCrLf & respostaTexto
+    End If
+
+    ChamarClaudeAPI = conteudo
+End Function
+
+Private Function LerArquivoTexto(caminho As String) As String
+    Dim nFile As Integer, linha As String, resultado As String
+    nFile = FreeFile
+    Open caminho For Input As #nFile
+    Do While Not EOF(nFile)
+        Line Input #nFile, linha
+        resultado = resultado & linha & vbLf
+    Loop
+    Close #nFile
+    LerArquivoTexto = resultado
+End Function
+
+#Else
+
+' --- Versão Windows: usa WinHttp (nativo do Windows) para a requisição,
+' e ADODB.Stream apenas para garantir a codificação em UTF-8 (o
+' WinHttpRequest, por padrão, não usa UTF-8, o que corrompe acentuação).
 Private Function ChamarClaudeAPI(apiKey As String, nomeArquivo As String, textoContrato As String) As String
     Dim jsonBody As String
     jsonBody = "{""model"":""" & MODEL_NAME & """," & _
@@ -173,11 +276,6 @@ Private Function ChamarClaudeAPI(apiKey As String, nomeArquivo As String, textoC
     ChamarClaudeAPI = conteudo
 End Function
 
-
-' ---------------------------------------------------------------------
-' UTF-8: request/response precisam de conversão explícita para não
-' corromper acentuação (o WinHttpRequest, por padrão, não usa UTF-8).
-' ---------------------------------------------------------------------
 Private Function StringParaBytesUtf8(ByVal texto As String) As Variant
     Dim stream As Object
     Set stream = CreateObject("ADODB.Stream")
@@ -213,6 +311,8 @@ Private Function BytesUtf8ParaString(ByVal bytes As Variant) As String
     BytesUtf8ParaString = stream.ReadText
     stream.Close
 End Function
+
+#End If
 
 
 ' ---------------------------------------------------------------------
