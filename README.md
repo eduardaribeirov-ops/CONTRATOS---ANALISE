@@ -8,15 +8,17 @@ contrato.
 de regras (busca de cláusulas comuns por palavra-chave) que roda inteiramente no seu
 computador — nada do contrato é enviado para a internet.
 
-Duas formas de uso, complementares:
+Três formas de uso, complementares:
 
 | | Onde roda | Formatos aceitos | Como usar |
 |---|---|---|---|
+| [`windows/`](windows/) | Windows (arrastar-e-soltar) | `.docx` **e** `.pdf` | Arraste o contrato sobre `AnalisarContrato.bat` — relatório abre sozinho |
 | [`word-macro/`](word-macro/) | Dentro do Word (Windows **e** Mac) | `.docx` (documento aberto) | Um clique no Word, gera um novo documento com a análise |
 | [`python/`](python/) | Terminal (Windows, Mac ou Linux) | `.docx` e `.pdf` | `python analisar_contrato.py contrato.pdf` |
 
-As duas usam o mesmo roteiro de regras — veja `python/contract_analyzer/rules.py`
-e a função `GerarAnaliseLocal` em `word-macro/AnaliseContratos.bas`.
+As três usam o mesmo roteiro de regras — veja `python/contract_analyzer/rules.py`
+e a função `GerarAnaliseLocal` em `word-macro/AnaliseContratos.bas`. O lançador
+do Windows é apenas um atalho de um clique por cima do motor Python.
 
 ## O que a análise verifica
 
@@ -46,9 +48,12 @@ Use como um primeiro filtro/checklist, não como substituto de revisão jurídic
 
 ## Por onde começar
 
+- **Está no Windows e quer o jeito mais automático (inclusive PDF)?** Vá para
+  [`windows/INSTALACAO_WINDOWS.md`](windows/INSTALACAO_WINDOWS.md): você arrasta o
+  contrato sobre um arquivo e o relatório abre sozinho, sem terminal.
 - Só precisa analisar `.docx` direto no Word, sem instalar nada mais? Vá para
   [`word-macro/INSTALACAO.md`](word-macro/INSTALACAO.md) (Windows e Mac).
-- Precisa analisar PDFs, ou rodar vários contratos em lote pelo terminal? Vá para
+- Precisa rodar em Mac/Linux, ou vários contratos em lote pelo terminal? Vá para
   [`python/README.md`](python/README.md) (funciona igual em Windows, Mac e Linux).
 
 ## Aviso
