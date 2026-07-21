@@ -30,8 +30,8 @@ Option Explicit
 ' =====================================================================
 
 Private Const COR_ALTA As Long = 192          ' RGB(192,0,0) - vermelho
-Private Const COR_MEDIA As Long = 2925740     ' RGB(184,134,11) - dourado escuro
-Private Const COR_BAIXA As Long = 3382558     ' RGB(30,123,52) - verde
+Private Const COR_MEDIA As Long = 755384      ' RGB(184,134,11) - dourado escuro
+Private Const COR_BAIXA As Long = 3439390     ' RGB(30,123,52) - verde
 
 
 ' ---------------------------------------------------------------------
@@ -57,19 +57,30 @@ Sub AnalisarContratoAtual()
         Exit Sub
     End If
 
-    Application.ScreenUpdating = False
-
     Dim analiseTexto As String
     analiseTexto = GerarAnaliseLocal(textoContrato)
 
     Dim novoDoc As Document
     Set novoDoc = Documents.Add
+    novoDoc.Activate
+
+    Application.ScreenUpdating = False
 
     Dim qtdPontos As Long
-    qtdPontos = MontarRelatorio(novoDoc, analiseTexto, docOrigem.Name)
+    qtdPontos = MontarRelatorio(analiseTexto, docOrigem.Name)
 
     Application.ScreenUpdating = True
-    novoDoc.Activate
+
+    ' Verificação de sanidade: se o documento novo ficou vazio por algum
+    ' motivo inesperado, avisa com dados de diagnóstico em vez de deixar
+    ' o usuário só olhando para uma página em branco sem explicação.
+    If Len(novoDoc.Content.Text) < 50 Then
+        MsgBox "Aviso: o documento gerado ficou vazio ou muito curto, o que não era " & _
+               "esperado. Dados para diagnóstico - pontos encontrados: " & qtdPontos & _
+               "; tamanho do texto de análise gerado internamente: " & Len(analiseTexto) & _
+               " caracteres.", vbExclamation
+        Exit Sub
+    End If
 
     MsgBox "Análise concluída." & vbCrLf & qtdPontos & _
            " ponto(s) de melhoria/ajuste identificado(s)." & vbCrLf & _
@@ -366,47 +377,47 @@ End Function
 ' ---------------------------------------------------------------------
 ' Parsing da análise (marcadores) e montagem do documento de saída
 ' ---------------------------------------------------------------------
-Private Function MontarRelatorio(doc As Document, analiseTexto As String, nomeArquivoOrigem As String) As Long
-    Dim rng As Range
-    Set rng = doc.Content
-    rng.Collapse wdCollapseEnd
+' Monta o relatório digitando no documento ATIVO (novoDoc, já ativado pelo
+' chamador) através do objeto Selection - a forma mais simples e testada
+' de gerar conteúdo formatado via VBA no Word, em vez de manipular
+' objetos Range diretamente.
+Private Function MontarRelatorio(analiseTexto As String, nomeArquivoOrigem As String) As Long
+    Escreve "Análise de Contrato", negrito:=True, tamanho:=20
+    Escreve "", quebraDepois:=True
 
-    Escreve rng, "Análise de Contrato", negrito:=True, tamanho:=20
-    Escreve rng, "", quebraDepois:=True
+    Escreve "Arquivo analisado: " & nomeArquivoOrigem, italico:=True, quebraDepois:=True
+    Escreve "Data da análise: " & Format(Now, "dd/mm/yyyy"), italico:=True, quebraDepois:=True
+    Escreve "", quebraDepois:=True
 
-    Escreve rng, "Arquivo analisado: " & nomeArquivoOrigem, italico:=True, quebraDepois:=True
-    Escreve rng, "Data da análise: " & Format(Now, "dd/mm/yyyy"), italico:=True, quebraDepois:=True
-    Escreve rng, "", quebraDepois:=True
-
-    Escreve rng, "Resumo do Contrato", negrito:=True, tamanho:=15, quebraDepois:=True
-    Escreve rng, "Partes: ", negrito:=True
-    Escreve rng, ValorAposMarcador(analiseTexto, "##RESUMO_PARTES##"), quebraDepois:=True
-    Escreve rng, "Objeto: ", negrito:=True
-    Escreve rng, ValorAposMarcador(analiseTexto, "##RESUMO_OBJETO##"), quebraDepois:=True
-    Escreve rng, "Valor e pagamento: ", negrito:=True
-    Escreve rng, ValorAposMarcador(analiseTexto, "##RESUMO_VALOR##"), quebraDepois:=True
-    Escreve rng, "Prazo e vigência: ", negrito:=True
-    Escreve rng, ValorAposMarcador(analiseTexto, "##RESUMO_PRAZO##"), quebraDepois:=True
-    Escreve rng, "", quebraDepois:=True
+    Escreve "Resumo do Contrato", negrito:=True, tamanho:=15, quebraDepois:=True
+    Escreve "Partes: ", negrito:=True
+    Escreve ValorAposMarcador(analiseTexto, "##RESUMO_PARTES##"), quebraDepois:=True
+    Escreve "Objeto: ", negrito:=True
+    Escreve ValorAposMarcador(analiseTexto, "##RESUMO_OBJETO##"), quebraDepois:=True
+    Escreve "Valor e pagamento: ", negrito:=True
+    Escreve ValorAposMarcador(analiseTexto, "##RESUMO_VALOR##"), quebraDepois:=True
+    Escreve "Prazo e vigência: ", negrito:=True
+    Escreve ValorAposMarcador(analiseTexto, "##RESUMO_PRAZO##"), quebraDepois:=True
+    Escreve "", quebraDepois:=True
 
     Dim qtdPontos As Long
     qtdPontos = ContarOcorrencias(analiseTexto, "##PONTO_INICIO##")
 
-    Escreve rng, "Pontos de Melhoria / Ajuste Necessários (" & qtdPontos & ")", _
+    Escreve "Pontos de Melhoria / Ajuste Necessários (" & qtdPontos & ")", _
         negrito:=True, tamanho:=15, quebraDepois:=True
 
     If qtdPontos = 0 Then
-        Escreve rng, "Nenhum ponto relevante identificado.", quebraDepois:=True
+        Escreve "Nenhum ponto relevante identificado.", quebraDepois:=True
     Else
-        InserirPontos rng, analiseTexto
+        InserirPontos analiseTexto
     End If
 
-    Escreve rng, "", quebraDepois:=True
-    Escreve rng, "Conclusão", negrito:=True, tamanho:=15, quebraDepois:=True
-    Escreve rng, ValorAposMarcador(analiseTexto, "##CONCLUSAO##"), quebraDepois:=True
+    Escreve "", quebraDepois:=True
+    Escreve "Conclusão", negrito:=True, tamanho:=15, quebraDepois:=True
+    Escreve ValorAposMarcador(analiseTexto, "##CONCLUSAO##"), quebraDepois:=True
 
-    Escreve rng, "", quebraDepois:=True
-    Escreve rng, "Este documento é gerado automaticamente por um checklist de regras " & _
+    Escreve "", quebraDepois:=True
+    Escreve "Este documento é gerado automaticamente por um checklist de regras " & _
         "(busca por palavras-chave, sem uso de IA) e tem caráter apenas informativo/" & _
         "preparatório - pode haver falsos positivos e falsos negativos. Recomenda-se " & _
         "revisão por um advogado antes de qualquer decisão.", italico:=True, tamanho:=9
@@ -414,7 +425,7 @@ Private Function MontarRelatorio(doc As Document, analiseTexto As String, nomeAr
     MontarRelatorio = qtdPontos
 End Function
 
-Private Sub InserirPontos(ByRef rng As Range, analiseTexto As String)
+Private Sub InserirPontos(analiseTexto As String)
     Const MARC_INICIO As String = "##PONTO_INICIO##"
     Const MARC_FIM As String = "##PONTO_FIM##"
 
@@ -432,13 +443,13 @@ Private Sub InserirPontos(ByRef rng As Range, analiseTexto As String)
         Dim bloco As String
         bloco = Trim(Mid(analiseTexto, posIni, posFim - posIni))
         numero = numero + 1
-        InserirUmPonto rng, numero, bloco
+        InserirUmPonto numero, bloco
 
         pos = posFim + Len(MARC_FIM)
     Loop
 End Sub
 
-Private Sub InserirUmPonto(ByRef rng As Range, numero As Long, bloco As String)
+Private Sub InserirUmPonto(numero As Long, bloco As String)
     Dim titulo As String, categoria As String, gravidade As String
     Dim trecho As String, problema As String, sugestao As String
 
@@ -475,23 +486,23 @@ Private Sub InserirUmPonto(ByRef rng As Range, numero As Long, bloco As String)
         Case Else: cor = 0
     End Select
 
-    Escreve rng, numero & ". " & titulo, negrito:=True, tamanho:=12, quebraDepois:=True
-    Escreve rng, "Gravidade: " & gravidade, negrito:=True, cor:=cor
-    If categoria <> "" Then Escreve rng, "   |   Categoria: " & categoria
-    Escreve rng, "", quebraDepois:=True
+    Escreve numero & ". " & titulo, negrito:=True, tamanho:=12, quebraDepois:=True
+    Escreve "Gravidade: " & gravidade, negrito:=True, cor:=cor
+    If categoria <> "" Then Escreve "   |   Categoria: " & categoria
+    Escreve "", quebraDepois:=True
     If trecho <> "" Then
-        Escreve rng, "Cláusula/trecho: ", italico:=True
-        Escreve rng, trecho, italico:=True, quebraDepois:=True
+        Escreve "Cláusula/trecho: ", italico:=True
+        Escreve trecho, italico:=True, quebraDepois:=True
     End If
     If problema <> "" Then
-        Escreve rng, "Problema: ", negrito:=True
-        Escreve rng, problema, quebraDepois:=True
+        Escreve "Problema: ", negrito:=True
+        Escreve problema, quebraDepois:=True
     End If
     If sugestao <> "" Then
-        Escreve rng, "Sugestão de ajuste: ", negrito:=True
-        Escreve rng, sugestao, quebraDepois:=True
+        Escreve "Sugestão de ajuste: ", negrito:=True
+        Escreve sugestao, quebraDepois:=True
     End If
-    Escreve rng, "", quebraDepois:=True
+    Escreve "", quebraDepois:=True
 End Sub
 
 
@@ -499,31 +510,35 @@ End Sub
 ' Auxiliares genéricos
 ' ---------------------------------------------------------------------
 
-' Escreve texto no fim de rng, aplicando formatação, e deixa rng
-' posicionado (colapsado) logo após o texto inserido para a próxima chamada.
-Private Sub Escreve(ByRef rng As Range, texto As String, _
+' Digita texto na posição atual do cursor (Selection) no documento ativo,
+' aplicando formatação, e restaura a formatação padrão em seguida para
+' não "vazar" para o próximo trecho escrito.
+Private Sub Escreve(texto As String, _
     Optional negrito As Boolean = False, Optional italico As Boolean = False, _
     Optional cor As Long = 0, Optional tamanho As Single = 0, _
     Optional quebraDepois As Boolean = False)
 
-    Dim posIni As Long
-    posIni = rng.End
-    rng.InsertAfter texto
-    rng.Collapse wdCollapseEnd
+    With Selection.Font
+        .Bold = negrito
+        .Italic = italico
+        .Size = IIf(tamanho > 0, tamanho, 11)
+        If cor <> 0 Then
+            .Color = cor
+        Else
+            .Color = wdColorAutomatic
+        End If
+    End With
 
-    If Len(texto) > 0 Then
-        Dim formatado As Range
-        Set formatado = rng.Document.Range(posIni, rng.End)
-        formatado.Font.Bold = negrito
-        formatado.Font.Italic = italico
-        If cor <> 0 Then formatado.Font.Color = cor
-        If tamanho > 0 Then formatado.Font.Size = tamanho
-    End If
+    If Len(texto) > 0 Then Selection.TypeText texto
+    If quebraDepois Then Selection.TypeParagraph
 
-    If quebraDepois Then
-        rng.InsertParagraphAfter
-        rng.Collapse wdCollapseEnd
-    End If
+    ' restaura o padrão para a próxima chamada não herdar esta formatação
+    With Selection.Font
+        .Bold = False
+        .Italic = False
+        .Size = 11
+        .Color = wdColorAutomatic
+    End With
 End Sub
 
 ' Retorna o texto entre um marcador "##NOME##" e o próximo marcador "##".
