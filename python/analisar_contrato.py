@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """CLI: analisa um contrato (.docx ou .pdf) e gera um relatório .docx com
-resumo e pontos de melhoria/ajuste, usando a API da Anthropic (Claude).
+resumo e pontos de melhoria/ajuste, usando um checklist de regras 100%
+offline (sem IA, sem chave de API, sem custo e sem enviar o contrato para
+a internet).
 
 Uso:
     python analisar_contrato.py caminho/para/contrato.docx
@@ -13,43 +15,22 @@ import argparse
 import os
 import sys
 
-from contract_analyzer import AnalysisError, ExtractionError, analyze_contract, build_report, extract_text
-
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv()
-except ImportError:
-    pass
+from contract_analyzer import ExtractionError, analisar_por_regras, build_report, extract_text
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Analisa um contrato (.docx/.pdf) com IA.")
+    parser = argparse.ArgumentParser(
+        description="Analisa um contrato (.docx/.pdf) com um checklist de regras offline."
+    )
     parser.add_argument("arquivo", help="Caminho do contrato (.docx ou .pdf)")
     parser.add_argument(
         "-o", "--output", help="Caminho do relatório de saída (.docx). "
         "Padrão: <nome_do_arquivo>_analise.docx"
     )
-    parser.add_argument(
-        "--api-key", default=os.environ.get("ANTHROPIC_API_KEY"),
-        help="Chave da API da Anthropic. Padrão: variável de ambiente ANTHROPIC_API_KEY",
-    )
-    parser.add_argument(
-        "--model", default=None, help="Sobrescreve o modelo (padrão: variável ANTHROPIC_MODEL)"
-    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.arquivo):
         print(f"Erro: arquivo não encontrado: {args.arquivo}", file=sys.stderr)
-        return 1
-
-    if not args.api_key:
-        print(
-            "Erro: nenhuma chave de API informada. Defina a variável de ambiente "
-            "ANTHROPIC_API_KEY (ou crie um arquivo .env a partir de .env.example) "
-            "ou use --api-key.",
-            file=sys.stderr,
-        )
         return 1
 
     output_path = args.output or _default_output_path(args.arquivo)
@@ -61,17 +42,8 @@ def main() -> int:
         print(f"Erro na extração: {exc}", file=sys.stderr)
         return 1
 
-    print("Enviando contrato para análise (isso pode levar alguns segundos)...")
-    try:
-        analysis = analyze_contract(
-            filename=os.path.basename(args.arquivo),
-            contract_text=text,
-            api_key=args.api_key,
-            model=args.model,
-        )
-    except AnalysisError as exc:
-        print(f"Erro na análise: {exc}", file=sys.stderr)
-        return 1
+    print("Analisando contrato (checklist de regras, offline)...")
+    analysis = analisar_por_regras(text)
 
     build_report(analysis, os.path.basename(args.arquivo), output_path)
 

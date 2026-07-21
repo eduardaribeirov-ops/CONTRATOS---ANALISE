@@ -4,34 +4,30 @@ Option Explicit
 ' =====================================================================
 ' AnaliseContratos.bas
 '
-' Macro para o Microsoft Word que envia o contrato atualmente aberto para
-' a API da Anthropic (Claude), recebe uma análise (resumo + pontos de
-' melhoria/ajuste) e monta um NOVO documento do Word com o resultado
-' formatado. O documento original nunca é alterado.
+' Macro para o Microsoft Word que analisa o contrato atualmente aberto
+' usando um CHECKLIST DE REGRAS 100% OFFLINE (busca por palavras-chave de
+' cláusulas comuns em contratos brasileiros) e monta um NOVO documento do
+' Word com o resumo e os pontos de melhoria/ajuste encontrados. O
+' documento original nunca é alterado.
 '
-' Funciona em Word para Windows e Word para Mac (Office 2016 ou mais
-' recente) a partir do MESMO arquivo: a chamada HTTP é a única parte que
-' muda por plataforma (Windows usa WinHttp; Mac usa curl via AppleScript,
-' já que não existe WinHttp/ADODB no Mac) - ver os blocos "#If Mac Then"
-' mais abaixo. Todo o resto do código (prompts, parsing, montagem do
-' relatório) é o mesmo nas duas plataformas.
+' Sem custo, sem chave de API e sem internet: nada do contrato sai do seu
+' computador. Funciona igual em Word para Windows e Word para Mac, sem
+' nenhuma dependência específica de plataforma.
 '
-' Instalação:
-'  - Windows: veja INSTALACAO.md nesta mesma pasta.
-'  - Mac: veja INSTALACAO_MAC.md nesta mesma pasta.
+' Isto é uma varredura por palavras-chave, não uma leitura jurídica do
+' contrato - pode haver falsos positivos (a cláusula existe, mas usa
+' outras palavras) e falsos negativos (a palavra aparece, mas a cláusula
+' na prática é inadequada). Sempre revise com um advogado. O mesmo
+' roteiro de regras é reproduzido em Python em
+' python/contract_analyzer/rules.py, para quem preferir analisar PDFs ou
+' rodar em lote pelo terminal.
+'
+' Instalação: veja INSTALACAO.md nesta mesma pasta.
 '
 ' Uso: com um contrato aberto no Word, rode a macro AnalisarContratoAtual
 ' (Alt+F8 no Windows, ou Ferramentas > Macro > Macros no Mac), ou associe-a
 ' a um botão na Barra de Ferramentas de Acesso Rápido.
 ' =====================================================================
-
-Public Const MODEL_NAME As String = "claude-sonnet-4-5-20250929"
-Public Const ANTHROPIC_VERSION As String = "2023-06-01"
-Public Const API_URL As String = "https://api.anthropic.com/v1/messages"
-Public Const MAX_TOKENS As Long = 8000
-
-Private Const APP_SETTINGS_NAME As String = "AnaliseContratosIA"
-Private Const APP_SETTINGS_SECTION As String = "Config"
 
 Private Const COR_ALTA As Long = 192          ' RGB(192,0,0) - vermelho
 Private Const COR_MEDIA As Long = 2925740     ' RGB(184,134,11) - dourado escuro
@@ -52,13 +48,6 @@ Sub AnalisarContratoAtual()
     Dim docOrigem As Document
     Set docOrigem = ActiveDocument
 
-    Dim apiKey As String
-    apiKey = ObterChaveAPI()
-    If apiKey = "" Then
-        MsgBox "Análise cancelada: nenhuma chave de API foi informada.", vbExclamation
-        Exit Sub
-    End If
-
     Dim textoContrato As String
     textoContrato = TextoDoDocumento(docOrigem)
 
@@ -68,11 +57,10 @@ Sub AnalisarContratoAtual()
         Exit Sub
     End If
 
-    Application.StatusBar = "Analisando contrato com IA, aguarde (pode levar cerca de 1 minuto)..."
     Application.ScreenUpdating = False
 
     Dim analiseTexto As String
-    analiseTexto = ChamarClaudeAPI(apiKey, docOrigem.Name, textoContrato)
+    analiseTexto = GerarAnaliseLocal(textoContrato)
 
     Dim novoDoc As Document
     Set novoDoc = Documents.Add
@@ -81,7 +69,6 @@ Sub AnalisarContratoAtual()
     qtdPontos = MontarRelatorio(novoDoc, analiseTexto, docOrigem.Name)
 
     Application.ScreenUpdating = True
-    Application.StatusBar = ""
     novoDoc.Activate
 
     MsgBox "Análise concluída." & vbCrLf & qtdPontos & _
@@ -91,42 +78,8 @@ Sub AnalisarContratoAtual()
 
 TratarErro:
     Application.ScreenUpdating = True
-    Application.StatusBar = ""
     MsgBox "Ocorreu um erro na análise:" & vbCrLf & Err.Description, vbCritical
 End Sub
-
-
-' Remove a chave de API salva, para permitir cadastrar uma nova.
-Sub RedefinirChaveAPI()
-    DeleteSetting APP_SETTINGS_NAME, APP_SETTINGS_SECTION, "ApiKey"
-    MsgBox "Chave de API removida. Na próxima análise, uma nova chave será solicitada.", vbInformation
-End Sub
-
-
-' ---------------------------------------------------------------------
-' Configuração / chave de API
-' ---------------------------------------------------------------------
-Private Function ObterChaveAPI() As String
-    Dim chave As String
-    chave = GetSetting(APP_SETTINGS_NAME, APP_SETTINGS_SECTION, "ApiKey", "")
-
-    If chave = "" Then
-        chave = InputBox( _
-            "Informe sua chave de API da Anthropic (começa com 'sk-ant-')." & vbCrLf & vbCrLf & _
-            "Você pode gerar uma em: https://console.anthropic.com/settings/keys" & vbCrLf & vbCrLf & _
-            "Ela ficará salva no seu perfil deste computador e não será pedida de novo " & _
-            "(use a macro RedefinirChaveAPI para trocá-la no futuro).", _
-            "Chave de API - Anthropic")
-        chave = Trim(chave)
-        If chave = "" Then
-            ObterChaveAPI = ""
-            Exit Function
-        End If
-        SaveSetting APP_SETTINGS_NAME, APP_SETTINGS_SECTION, "ApiKey", chave
-    End If
-
-    ObterChaveAPI = chave
-End Function
 
 
 ' ---------------------------------------------------------------------
@@ -142,413 +95,276 @@ End Function
 
 
 ' ---------------------------------------------------------------------
-' Chamada à API da Anthropic (implementação específica por plataforma)
+' Motor de análise por checklist de regras (mesmo roteiro da versão
+' Python em contract_analyzer/rules.py). Gera o texto da análise no
+' mesmo formato de marcadores usado antes com a API, para reaproveitar
+' o parser/montador de relatório abaixo sem mudanças.
 ' ---------------------------------------------------------------------
+Private Function GerarAnaliseLocal(textoContrato As String) As String
+    Dim textoBusca As String
+    textoBusca = RemoverAcentos(LCase(textoContrato))
 
-#If Mac Then
+    Dim s As String
+    s = "##RESUMO_PARTES##" & vbLf & ExtrairTrecho(textoContrato, textoBusca, Array("cnpj", "cpf", "contratante", "contratado")) & vbLf
+    s = s & "##RESUMO_OBJETO##" & vbLf & ExtrairTrecho(textoContrato, textoBusca, Array("objeto do presente", "objeto deste contrato", "objeto do contrato", "tem por objeto")) & vbLf
+    s = s & "##RESUMO_VALOR##" & vbLf & ExtrairTrecho(textoContrato, textoBusca, Array("r$", "valor mensal", "valor total", "remuneracao", "preco")) & vbLf
+    s = s & "##RESUMO_PRAZO##" & vbLf & ExtrairTrecho(textoContrato, textoBusca, Array("vigencia", "prazo de", "vigorara")) & vbLf
 
-' --- Versão Mac: não existem WinHttp/ADODB no Word para Mac, então a
-' chamada HTTP é feita via "curl" (já vem instalado em todo macOS),
-' disparado através de AppleScript (MacScript/"do shell script"), que é
-' a forma padrão de fazer requisições de rede a partir de VBA no Mac.
-Private Function ChamarClaudeAPI(apiKey As String, nomeArquivo As String, textoContrato As String) As String
-    Dim jsonBody As String
-    jsonBody = "{""model"":""" & MODEL_NAME & """," & _
-               """max_tokens"":" & MAX_TOKENS & "," & _
-               """system"":""" & EscaparJSON(GerarSystemPrompt()) & """," & _
-               """messages"":[{""role"":""user"",""content"":""" & _
-               EscaparJSON(GerarUserPrompt(nomeArquivo, textoContrato)) & """}]}"
+    Dim pontos As String
+    pontos = ""
 
-    Dim q As String
-    q = Chr(34) ' aspas duplas - usada para montar o comando com clareza,
-                ' em vez de sequências densas de "" dentro da string
+    ' --- Regras de AUSÊNCIA: sinalizadas quando NENHUMA palavra-chave aparece ---
+    pontos = pontos & AvaliarAusencia(textoBusca, "Qualificação das partes pode estar incompleta", "Partes", "Média", _
+        Array("cnpj", "cpf"), _
+        "Não foi localizado CNPJ nem CPF no texto, o que pode indicar que as partes não estão qualificadas de forma completa.", _
+        "Confirme que o contrato qualifica completamente as partes (nome/razão social, CPF/CNPJ, endereço).")
 
-    ' Cria uma pasta temporária exclusiva via shell e grava a requisição
-    ' em arquivo, em vez de embutir o contrato inteiro na linha de
-    ' comando (evita estourar limites de tamanho de linha de comando).
-    Dim pastaTemp As String
-    pastaTemp = MacScript("do shell script " & q & "mktemp -d" & q)
+    pontos = pontos & AvaliarAusencia(textoBusca, "Objeto do contrato não identificado claramente", "Objeto", "Alta", _
+        Array("objeto do presente", "objeto deste contrato", "objeto do contrato", "tem por objeto"), _
+        "Não foi localizada uma cláusula clara definindo o objeto do contrato.", _
+        "Inclua uma cláusula específica descrevendo o objeto do contrato de forma clara e detalhada.")
 
-    Dim caminhoRequest As String, caminhoResponse As String
-    caminhoRequest = pastaTemp & "/request.json"
-    caminhoResponse = pastaTemp & "/response.json"
+    pontos = pontos & AvaliarAusencia(textoBusca, "Valor e forma de pagamento não identificados", "Valor", "Alta", _
+        Array("r$", "valor mensal", "valor total", "remuneracao", "preco"), _
+        "Não foi localizada referência clara a valor, preço ou remuneração.", _
+        "Explicite o valor, a moeda, a forma e o prazo de pagamento.")
 
-    EscreverArquivoUtf8 caminhoRequest, jsonBody
+    pontos = pontos & AvaliarAusencia(textoBusca, "Cláusula de reajuste/correção monetária ausente", "Valor", "Média", _
+        Array("reajuste", "correcao monetaria", "ipca", "igp-m", "igpm", "inpc"), _
+        "Não há previsão de índice de reajuste/correção monetária, relevante para contratos de longa duração.", _
+        "Se o contrato for de longa duração, defina o índice (ex.: IPCA, IGP-M) e a periodicidade do reajuste.")
 
-    ' "-w '%{http_code}'" faz o curl devolver o status HTTP como saída do
-    ' "do shell script" (o corpo da resposta vai para o arquivo via -o).
-    Dim comandoAS As String
-    comandoAS = "do shell script " & q & _
-        "curl -s --max-time 180 -o '" & caminhoResponse & "' -w '%{http_code}' " & _
-        "-X POST " & API_URL & " " & _
-        "-H 'x-api-key: " & apiKey & "' " & _
-        "-H 'anthropic-version: " & ANTHROPIC_VERSION & "' " & _
-        "-H 'content-type: application/json' " & _
-        "--data-binary @'" & caminhoRequest & "'" & q
+    pontos = pontos & AvaliarAusencia(textoBusca, "Prazo de vigência não identificado", "Prazo", "Média", _
+        Array("vigencia", "prazo de", "vigorara", "vigor deste"), _
+        "Não foi localizada cláusula clara de prazo/vigência do contrato.", _
+        "Defina explicitamente a data de início, a duração e as condições de término do contrato.")
 
-    Dim statusCode As String
-    statusCode = MacScript(comandoAS)
+    pontos = pontos & AvaliarAusencia(textoBusca, "Cláusula de multa/penalidade ausente", "Multas", "Média", _
+        Array("multa", "penalidade"), _
+        "Não foi localizada cláusula de multa por descumprimento contratual.", _
+        "Avalie incluir multa proporcional para as partes em caso de inadimplemento ou descumprimento.")
 
-    Dim respostaTexto As String
-    respostaTexto = LerArquivoUtf8(caminhoResponse)
+    pontos = pontos & AvaliarAusencia(textoBusca, "Cláusula de rescisão ausente", "Rescisão", "Alta", _
+        Array("rescisao", "resilicao", "rescindir", "resolucao do contrato"), _
+        "Não foi localizada cláusula regulando a rescisão/resilição do contrato.", _
+        "Inclua uma cláusula de rescisão prevendo motivos, forma de comunicação e eventuais penalidades.")
 
-    On Error Resume Next
-    Kill caminhoRequest
-    Kill caminhoResponse
-    MacScript "do shell script " & q & "rmdir '" & pastaTemp & "'" & q
-    On Error GoTo 0
+    pontos = pontos & AvaliarAusencia(textoBusca, "Cláusula de confidencialidade ausente", "Confidencialidade", "Média", _
+        Array("confidencial", "sigilo"), _
+        "Não foi localizada cláusula de confidencialidade/sigilo das informações trocadas entre as partes.", _
+        "Avalie incluir cláusula de confidencialidade, especialmente se houver troca de informações sensíveis.")
 
-    If statusCode <> "200" Then
-        Err.Raise vbObjectError + 1, , _
-            "A API respondeu com erro " & statusCode & ":" & vbCrLf & respostaTexto & vbCrLf & vbCrLf & _
-            "Verifique sua chave de API (rode RedefinirChaveAPI para trocá-la), sua conexão " & _
-            "com a internet e as permissões de Automação do Word em Ajustes do Sistema > " & _
-            "Privacidade e Segurança > Automação. Se o erro mencionar o nome do modelo, " & _
-            "atualize a constante MODEL_NAME no topo deste módulo " & _
-            "(veja https://docs.anthropic.com/en/docs/about-claude/models)."
+    pontos = pontos & AvaliarAusencia(textoBusca, "Cláusula de proteção de dados (LGPD) ausente", "LGPD", "Alta", _
+        Array("lgpd", "dados pessoais", "13.709", "protecao de dados"), _
+        "Não foi localizada cláusula sobre tratamento de dados pessoais (Lei 13.709/2018 - LGPD).", _
+        "Inclua cláusula definindo como os dados pessoais tratados no contrato serão protegidos, conforme a LGPD.")
+
+    pontos = pontos & AvaliarAusencia(textoBusca, "Cláusula de responsabilidade civil ausente", "Responsabilidade", "Média", _
+        Array("responsabilidade civil", "indenizacao", "limitacao de responsabilidade"), _
+        "Não foi localizada cláusula sobre responsabilidade civil/indenização entre as partes.", _
+        "Defina a responsabilidade de cada parte por danos causados e, se aplicável, limites de indenização.")
+
+    pontos = pontos & AvaliarAusencia(textoBusca, "Cláusula de garantias ausente", "Garantias", "Baixa", _
+        Array("garantia"), _
+        "Não foi localizada cláusula de garantias sobre o objeto do contrato.", _
+        "Avalie se o contrato deveria prever garantias (ex.: qualidade do serviço/produto, prazo de garantia).")
+
+    pontos = pontos & AvaliarAusencia(textoBusca, "Cláusula de força maior ausente", "Força maior", "Média", _
+        Array("forca maior", "caso fortuito"), _
+        "Não foi localizada cláusula de força maior/caso fortuito.", _
+        "Inclua cláusula prevendo tratamento para eventos de força maior ou caso fortuito.")
+
+    pontos = pontos & AvaliarAusencia(textoBusca, "Cláusula de propriedade intelectual ausente", "Propriedade Intelectual", "Baixa", _
+        Array("propriedade intelectual", "direitos autorais"), _
+        "Não foi localizada cláusula sobre propriedade intelectual/direitos autorais.", _
+        "Se o contrato envolver criação de conteúdo, software ou marca, defina a quem pertencem os direitos.")
+
+    pontos = pontos & AvaliarAusencia(textoBusca, "Foro de eleição não identificado", "Foro", "Alta", _
+        Array("foro", "eleicao de foro", "comarca de"), _
+        "Não foi localizada cláusula de eleição de foro/comarca para dirimir eventuais conflitos.", _
+        "Inclua cláusula de eleição de foro, definindo a comarca competente para resolver eventuais litígios.")
+
+    pontos = pontos & AvaliarAusencia(textoBusca, "Cláusula de mediação/arbitragem ausente", "Solução de Conflitos", "Baixa", _
+        Array("mediacao", "arbitragem"), _
+        "Não foi localizada cláusula de mediação ou arbitragem como alternativa ao Judiciário.", _
+        "Avalie incluir uma cláusula de mediação/arbitragem, dependendo da natureza e do valor do contrato.")
+
+    pontos = pontos & AvaliarAusencia(textoBusca, "Testemunhas ou assinatura eletrônica não mencionadas", "Assinatura", "Baixa", _
+        Array("testemunha", "assinatura eletronica", "certificado digital"), _
+        "Não foi localizada menção a testemunhas ou à validade de assinatura eletrônica.", _
+        "Confirme a forma de assinatura (física com testemunhas, ou eletrônica) e sua validade jurídica.")
+
+    ' --- Regras CONDICIONAIS: só avaliadas se o "gatilho" estiver presente ---
+    pontos = pontos & AvaliarCondicional(textoContrato, textoBusca, _
+        "Renovação automática sem regra clara de não renovação", "Prazo", "Média", _
+        Array("renovacao automatica", "renovado automaticamente", "prorrogacao automatica", "prorrogado automaticamente"), _
+        Array("nao renovacao", "manifestacao em contrario", "aviso previo", "antecedencia minima", "notificar a nao renovacao"), _
+        "O contrato prevê renovação automática, mas não foi localizada uma regra clara de como evitar a renovação.", _
+        "Defina o prazo e a forma de manifestação para que uma das partes possa optar por não renovar o contrato.")
+
+    pontos = pontos & AvaliarCondicional(textoContrato, textoBusca, _
+        "Rescisão sem prazo de aviso prévio", "Rescisão", "Média", _
+        Array("rescisao", "resilicao", "rescindir"), _
+        Array("aviso previo", "notificacao previa", "antecedencia"), _
+        "O contrato prevê rescisão, mas não foi localizado um prazo de aviso prévio para rescindir.", _
+        "Defina um prazo mínimo de aviso prévio para que qualquer parte possa rescindir o contrato.")
+
+    ' --- Regra INFORMATIVA: sempre exibida como lembrete quando aparece ---
+    If InStr(textoBusca, "anexo") > 0 Then
+        pontos = pontos & MontarBlocoPonto("Contrato faz referência a anexo(s)", "Anexos", "Baixa", _
+            ExtrairTrecho(textoContrato, textoBusca, Array("anexo")), _
+            "O contrato menciona um ou mais anexos.", _
+            "Confirme que todos os anexos citados estão de fato anexados, atualizados e assinados junto com o contrato.")
     End If
 
-    Dim conteudo As String
-    conteudo = ExtrairCampoTexto(respostaTexto)
-    If conteudo = "" Then
-        Err.Raise vbObjectError + 2, , "Não foi possível interpretar a resposta da API:" & vbCrLf & respostaTexto
-    End If
+    s = s & pontos
+    s = s & "##CONCLUSAO##" & vbLf & MontarConclusaoLocal(pontos) & vbLf
+    s = s & "##FIM##"
 
-    ChamarClaudeAPI = conteudo
+    GerarAnaliseLocal = s
 End Function
 
-' Grava/lê arquivos em UTF-8 usando E/S BINÁRIA + um codec UTF-8 escrito à
-' mão (funções Utf8Encode/Utf8Decode logo abaixo), em vez de "Open ... For
-' Output"/"Print #"/"Line Input #" em modo texto. Isso é necessário porque
-' o modo texto do VBA no Word para Mac usa a codificação legada MacRoman
-' (não UTF-8) para ler/gravar, o que corrompe qualquer acentuação e chega
-' a gerar bytes inválidos o suficiente para a API rejeitar a requisição
-' com "not valid UTF-8". E/S binária com Byte() não sofre essa conversão.
-Private Sub EscreverArquivoUtf8(caminho As String, conteudo As String)
-    Dim bytes() As Byte
-    bytes = Utf8Encode(conteudo)
+' Sinaliza um ponto quando NENHUMA das palavras-chave aparece no contrato.
+Private Function AvaliarAusencia(textoBusca As String, titulo As String, categoria As String, _
+    gravidade As String, palavrasChave As Variant, problema As String, sugestao As String) As String
 
-    Dim nFile As Integer
-    nFile = FreeFile
-    Open caminho For Binary Access Write As #nFile
-    Put #nFile, 1, bytes
-    Close #nFile
-End Sub
+    Dim palavra As Variant
+    For Each palavra In palavrasChave
+        If InStr(textoBusca, CStr(palavra)) > 0 Then
+            AvaliarAusencia = ""
+            Exit Function
+        End If
+    Next palavra
 
-Private Function LerArquivoUtf8(caminho As String) As String
-    Dim tamanho As Long
-    tamanho = FileLen(caminho)
-    If tamanho = 0 Then
-        LerArquivoUtf8 = ""
+    AvaliarAusencia = MontarBlocoPonto(titulo, categoria, gravidade, "ausente no contrato", problema, sugestao)
+End Function
+
+' Sinaliza um ponto quando alguma palavra-gatilho aparece, MAS nenhuma das
+' palavras esperadas (que deveriam acompanhá-la) é encontrada.
+Private Function AvaliarCondicional(textoOriginal As String, textoBusca As String, titulo As String, _
+    categoria As String, gravidade As String, palavrasGatilho As Variant, palavrasEsperadas As Variant, _
+    problema As String, sugestao As String) As String
+
+    Dim palavra As Variant
+    Dim gatilhoEncontrado As Boolean
+    gatilhoEncontrado = False
+    For Each palavra In palavrasGatilho
+        If InStr(textoBusca, CStr(palavra)) > 0 Then
+            gatilhoEncontrado = True
+            Exit For
+        End If
+    Next palavra
+
+    If Not gatilhoEncontrado Then
+        AvaliarCondicional = ""
         Exit Function
     End If
 
-    Dim bytes() As Byte
-    ReDim bytes(tamanho - 1)
+    For Each palavra In palavrasEsperadas
+        If InStr(textoBusca, CStr(palavra)) > 0 Then
+            AvaliarCondicional = "" ' cláusula esperada também foi encontrada - sem problema
+            Exit Function
+        End If
+    Next palavra
 
-    Dim nFile As Integer
-    nFile = FreeFile
-    Open caminho For Binary Access Read As #nFile
-    Get #nFile, 1, bytes
-    Close #nFile
-
-    LerArquivoUtf8 = Utf8Decode(bytes)
+    Dim trecho As String
+    trecho = ExtrairTrecho(textoOriginal, textoBusca, palavrasGatilho)
+    AvaliarCondicional = MontarBlocoPonto(titulo, categoria, gravidade, trecho, problema, sugestao)
 End Function
 
-' Codifica uma String do VBA (UTF-16 internamente) para um array de bytes UTF-8.
-Private Function Utf8Encode(ByVal texto As String) As Byte()
-    Dim resultado() As Byte
-    ReDim resultado(Len(texto) * 4 - 1) ' pior caso: 4 bytes por caractere
+Private Function MontarBlocoPonto(titulo As String, categoria As String, gravidade As String, _
+    trecho As String, problema As String, sugestao As String) As String
 
-    Dim posSaida As Long
-    posSaida = 0
+    Dim bloco As String
+    bloco = "##PONTO_INICIO##" & vbLf
+    bloco = bloco & "TITULO: " & titulo & vbLf
+    bloco = bloco & "CATEGORIA: " & categoria & vbLf
+    bloco = bloco & "GRAVIDADE: " & gravidade & vbLf
+    bloco = bloco & "TRECHO: " & trecho & vbLf
+    bloco = bloco & "PROBLEMA: " & problema & vbLf
+    bloco = bloco & "SUGESTAO: " & sugestao & vbLf
+    bloco = bloco & "##PONTO_FIM##" & vbLf
+    MontarBlocoPonto = bloco
+End Function
 
-    Dim i As Long, codigo As Long, codigoBaixo As Long, codigoCompleto As Long
-    i = 1
-    Do While i <= Len(texto)
-        codigo = AscW(Mid(texto, i, 1))
-        If codigo < 0 Then codigo = codigo + 65536 ' AscW é assinado; desfaz o sinal
+Private Function MontarConclusaoLocal(pontosTexto As String) As String
+    Dim qtdAlta As Long, qtdMedia As Long, qtdBaixa As Long
+    qtdAlta = ContarOcorrencias(pontosTexto, "GRAVIDADE: Alta")
+    qtdMedia = ContarOcorrencias(pontosTexto, "GRAVIDADE: Média")
+    qtdBaixa = ContarOcorrencias(pontosTexto, "GRAVIDADE: Baixa")
 
-        If codigo <= &H7F Then
-            resultado(posSaida) = codigo
-            posSaida = posSaida + 1
-        ElseIf codigo <= &H7FF Then
-            resultado(posSaida) = &HC0 Or (codigo \ &H40)
-            resultado(posSaida + 1) = &H80 Or (codigo And &H3F)
-            posSaida = posSaida + 2
-        ElseIf codigo >= &HD800 And codigo <= &HDBFF And i < Len(texto) Then
-            ' par substituto (surrogate pair) - caractere fora do BMP (ex.: emoji)
-            i = i + 1
-            codigoBaixo = AscW(Mid(texto, i, 1))
-            If codigoBaixo < 0 Then codigoBaixo = codigoBaixo + 65536
-            codigoCompleto = &H10000 + ((codigo - &HD800) * &H400) + (codigoBaixo - &HDC00)
-            resultado(posSaida) = &HF0 Or (codigoCompleto \ &H40000)
-            resultado(posSaida + 1) = &H80 Or ((codigoCompleto \ &H1000) And &H3F)
-            resultado(posSaida + 2) = &H80 Or ((codigoCompleto \ &H40) And &H3F)
-            resultado(posSaida + 3) = &H80 Or (codigoCompleto And &H3F)
-            posSaida = posSaida + 4
-        Else
-            resultado(posSaida) = &HE0 Or (codigo \ &H1000)
-            resultado(posSaida + 1) = &H80 Or ((codigo \ &H40) And &H3F)
-            resultado(posSaida + 2) = &H80 Or (codigo And &H3F)
-            posSaida = posSaida + 3
-        End If
-        i = i + 1
-    Loop
-
-    If posSaida = 0 Then
-        Utf8Encode = resultado ' string vazia
+    If qtdAlta + qtdMedia + qtdBaixa = 0 Then
+        MontarConclusaoLocal = _
+            "O checklist automático não identificou ausências entre os pontos verificados. " & _
+            "Isso NÃO significa que o contrato está juridicamente adequado - esta é uma " & _
+            "varredura por palavras-chave, não uma leitura jurídica. Recomenda-se revisão " & _
+            "por um advogado antes de assinar."
     Else
-        ReDim Preserve resultado(posSaida - 1)
-        Utf8Encode = resultado
+        MontarConclusaoLocal = _
+            "Foram identificados " & qtdAlta & " ponto(s) de gravidade alta, " & qtdMedia & _
+            " de gravidade média e " & qtdBaixa & " de gravidade baixa. Priorize a revisão " & _
+            "dos pontos de gravidade alta antes de assinar. Esta análise foi gerada por um " & _
+            "checklist automático de palavras-chave (sem uso de IA) e pode gerar falsos " & _
+            "positivos/negativos - recomenda-se revisão por um advogado."
     End If
 End Function
 
-' Decodifica um array de bytes UTF-8 de volta para uma String do VBA.
-Private Function Utf8Decode(ByRef bytes() As Byte) As String
-    Dim resultado As String
-    Dim i As Long, fim As Long
-    Dim b0 As Long, b1 As Long, b2 As Long, b3 As Long, codigo As Long
-
-    i = LBound(bytes)
-    fim = UBound(bytes)
-
-    Do While i <= fim
-        b0 = bytes(i)
-        If b0 < &H80 Then
-            resultado = resultado & Chr(b0)
-            i = i + 1
-        ElseIf (b0 And &HE0) = &HC0 And i + 1 <= fim Then
-            b1 = bytes(i + 1)
-            codigo = ((b0 And &H1F) * &H40) Or (b1 And &H3F)
-            resultado = resultado & ChrW(codigo)
-            i = i + 2
-        ElseIf (b0 And &HF0) = &HE0 And i + 2 <= fim Then
-            b1 = bytes(i + 1): b2 = bytes(i + 2)
-            codigo = ((b0 And &HF) * &H1000) Or ((b1 And &H3F) * &H40) Or (b2 And &H3F)
-            resultado = resultado & ChrW(codigo)
-            i = i + 3
-        ElseIf (b0 And &HF8) = &HF0 And i + 3 <= fim Then
-            b1 = bytes(i + 1): b2 = bytes(i + 2): b3 = bytes(i + 3)
-            codigo = ((b0 And &H7) * &H40000) Or ((b1 And &H3F) * &H1000) Or ((b2 And &H3F) * &H40) Or (b3 And &H3F)
-            codigo = codigo - &H10000
-            resultado = resultado & ChrW(&HD800 Or (codigo \ &H400)) & ChrW(&HDC00 Or (codigo And &H3FF))
-            i = i + 4
-        Else
-            i = i + 1 ' byte inválido/incompleto - ignora
-        End If
-    Loop
-
-    Utf8Decode = resultado
-End Function
-
-#Else
-
-' --- Versão Windows: usa WinHttp (nativo do Windows) para a requisição,
-' e ADODB.Stream apenas para garantir a codificação em UTF-8 (o
-' WinHttpRequest, por padrão, não usa UTF-8, o que corrompe acentuação).
-Private Function ChamarClaudeAPI(apiKey As String, nomeArquivo As String, textoContrato As String) As String
-    Dim jsonBody As String
-    jsonBody = "{""model"":""" & MODEL_NAME & """," & _
-               """max_tokens"":" & MAX_TOKENS & "," & _
-               """system"":""" & EscaparJSON(GerarSystemPrompt()) & """," & _
-               """messages"":[{""role"":""user"",""content"":""" & _
-               EscaparJSON(GerarUserPrompt(nomeArquivo, textoContrato)) & """}]}"
-
-    Dim http As Object
-    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
-    http.Open "POST", API_URL, False
-    http.SetRequestHeader "x-api-key", apiKey
-    http.SetRequestHeader "anthropic-version", ANTHROPIC_VERSION
-    http.SetRequestHeader "content-type", "application/json"
-    ' timeouts em ms: resolve, connect, send, receive (contratos longos podem demorar)
-    http.SetTimeouts 60000, 60000, 60000, 180000
-    http.Send StringParaBytesUtf8(jsonBody)
-
-    Dim respostaTexto As String
-    respostaTexto = BytesUtf8ParaString(http.ResponseBody)
-
-    If http.Status <> 200 Then
-        Err.Raise vbObjectError + 1, , _
-            "A API respondeu com erro " & http.Status & ":" & vbCrLf & respostaTexto & vbCrLf & vbCrLf & _
-            "Verifique sua chave de API (rode RedefinirChaveAPI para trocá-la) e, se o erro " & _
-            "mencionar o nome do modelo, atualize a constante MODEL_NAME no topo deste módulo " & _
-            "(veja https://docs.anthropic.com/en/docs/about-claude/models)."
-    End If
-
-    Dim conteudo As String
-    conteudo = ExtrairCampoTexto(respostaTexto)
-    If conteudo = "" Then
-        Err.Raise vbObjectError + 2, , "Não foi possível interpretar a resposta da API:" & vbCrLf & respostaTexto
-    End If
-
-    ChamarClaudeAPI = conteudo
-End Function
-
-Private Function StringParaBytesUtf8(ByVal texto As String) As Variant
-    Dim stream As Object
-    Set stream = CreateObject("ADODB.Stream")
-    stream.Type = 2 ' texto
-    stream.Charset = "utf-8"
-    stream.Open
-    stream.WriteText texto
-    stream.Position = 0
-    stream.Type = 1 ' binário
-    Dim todosOsBytes() As Byte
-    todosOsBytes = stream.Read
-    stream.Close
-
-    ' O ADODB.Stream grava um BOM UTF-8 (EF BB BF) no início; removemos.
-    Dim resultado() As Byte
+' Retira acentos comuns do português para tornar a busca por palavra-chave
+' mais tolerante a variações de digitação/extração de texto.
+Private Function RemoverAcentos(ByVal texto As String) As String
+    Const COM_ACENTO As String = "áàâãäéèêëíìîïóòôõöúùûüçÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇ"
+    Const SEM_ACENTO As String = "aaaaaeeeeiiiiooooouuuucAAAAAEEEEIIIIOOOOOUUUUC"
     Dim i As Long
-    ReDim resultado(UBound(todosOsBytes) - 3)
-    For i = 3 To UBound(todosOsBytes)
-        resultado(i - 3) = todosOsBytes(i)
+    For i = 1 To Len(COM_ACENTO)
+        texto = Replace(texto, Mid(COM_ACENTO, i, 1), Mid(SEM_ACENTO, i, 1))
     Next i
-    StringParaBytesUtf8 = resultado
+    RemoverAcentos = texto
 End Function
 
-Private Function BytesUtf8ParaString(ByVal bytes As Variant) As String
-    Dim stream As Object
-    Set stream = CreateObject("ADODB.Stream")
-    stream.Type = 1 ' binário
-    stream.Open
-    stream.Write bytes
-    stream.Position = 0
-    stream.Type = 2 ' texto
-    stream.Charset = "utf-8"
-    BytesUtf8ParaString = stream.ReadText
-    stream.Close
-End Function
+' Localiza a primeira ocorrência de alguma palavra-chave em textoBusca e
+' devolve uma janela de texto ao redor dela, extraída de textoOriginal
+' (preservando acentuação/formatação original para exibição).
+Private Function ExtrairTrecho(textoOriginal As String, textoBusca As String, palavrasChave As Variant) As String
+    Const JANELA As Long = 140
 
-#End If
+    Dim palavra As Variant, pos As Long
+    pos = 0
+    For Each palavra In palavrasChave
+        pos = InStr(textoBusca, CStr(palavra))
+        If pos > 0 Then Exit For
+    Next palavra
 
-
-' ---------------------------------------------------------------------
-' Utilitários de JSON (mínimo necessário: escapar string de saída e
-' extrair o campo "text" da resposta da Anthropic). A análise em si NÃO
-' é pedida em JSON (ver GerarSystemPrompt) para não exigir um parser
-' JSON completo em VBA - usamos marcadores de texto simples.
-' ---------------------------------------------------------------------
-Private Function EscaparJSON(ByVal s As String) As String
-    s = Replace(s, "\", "\\")
-    s = Replace(s, """", "\""")
-    s = Replace(s, vbCrLf, "\n")
-    s = Replace(s, vbCr, "\n")
-    s = Replace(s, vbLf, "\n")
-    s = Replace(s, vbTab, "\t")
-    EscaparJSON = s
-End Function
-
-Private Function ExtrairCampoTexto(ByVal json As String) As String
-    Dim marcador As String
-    marcador = """text"":"""
-    Dim posIni As Long
-    posIni = InStr(json, marcador)
-    If posIni = 0 Then
-        ExtrairCampoTexto = ""
+    If pos = 0 Then
+        ExtrairTrecho = "não identificado automaticamente - revise o contrato"
         Exit Function
     End If
-    posIni = posIni + Len(marcador)
 
-    Dim i As Long, c As String, prox As String
-    Dim resultado As String
-    i = posIni
-    Do While i <= Len(json)
-        c = Mid(json, i, 1)
-        If c = "\" Then
-            prox = Mid(json, i + 1, 1)
-            Select Case prox
-                Case "n": resultado = resultado & vbLf
-                Case "t": resultado = resultado & vbTab
-                Case "r": ' ignorado (normalmente acompanha \n)
-                Case """": resultado = resultado & """"
-                Case "\": resultado = resultado & "\"
-                Case "/": resultado = resultado & "/"
-                Case "u"
-                    Dim hexCode As String
-                    hexCode = Mid(json, i + 2, 4)
-                    resultado = resultado & ChrW(CLng("&H" & hexCode))
-                    i = i + 4
-                Case Else
-                    resultado = resultado & prox
-            End Select
-            i = i + 2
-        ElseIf c = """" Then
-            Exit Do
-        Else
-            resultado = resultado & c
-            i = i + 1
-        End If
+    Dim inicio As Long, tamanho As Long
+    inicio = pos - JANELA
+    If inicio < 1 Then inicio = 1
+    tamanho = JANELA * 2
+    If inicio + tamanho - 1 > Len(textoOriginal) Then tamanho = Len(textoOriginal) - inicio + 1
+
+    Dim trecho As String
+    trecho = Mid(textoOriginal, inicio, tamanho)
+    trecho = Replace(trecho, vbCrLf, " ")
+    trecho = Replace(trecho, vbCr, " ")
+    trecho = Replace(trecho, vbLf, " ")
+    trecho = Replace(trecho, vbTab, " ")
+    Do While InStr(trecho, "  ") > 0
+        trecho = Replace(trecho, "  ", " ")
     Loop
-    ExtrairCampoTexto = resultado
+    trecho = Trim(trecho)
+
+    If inicio > 1 Then trecho = "(...) " & trecho
+    If inicio + tamanho - 1 < Len(textoOriginal) Then trecho = trecho & " (...)"
+
+    ExtrairTrecho = trecho
 End Function
 
 
 ' ---------------------------------------------------------------------
-' Prompts (mesmo roteiro de análise usado na versão Python, adaptado
-' para um formato de marcadores de texto em vez de JSON)
-' ---------------------------------------------------------------------
-Private Function GerarSystemPrompt() As String
-    Dim s As String
-    s = s & "Você é um advogado especialista em direito contratual brasileiro (Código " & vbCrLf
-    s = s & "Civil, CDC quando aplicável, CLT quando for contrato de trabalho, e LGPD - " & vbCrLf
-    s = s & "Lei 13.709/2018). Revise o contrato enviado pelo usuário e produza uma " & vbCrLf
-    s = s & "análise objetiva, prática e acionável, como um parecer de revisão contratual." & vbCrLf & vbCrLf
-    s = s & "Analise o contrato considerando, no mínimo, estes aspectos (ignore os que não " & vbCrLf
-    s = s & "se aplicarem e cite outros que julgar relevantes): qualificação das partes; " & vbCrLf
-    s = s & "clareza do objeto; valor, pagamento e reajuste/correção monetária; prazo de " & vbCrLf
-    s = s & "vigência e renovação automática; multas e penalidades (proporcionalidade); " & vbCrLf
-    s = s & "condições de rescisão, aviso prévio e multa rescisória; confidencialidade; " & vbCrLf
-    s = s & "proteção de dados pessoais (LGPD); responsabilidade civil e suas limitações; " & vbCrLf
-    s = s & "garantias; força maior/caso fortuito; propriedade intelectual (se aplicável); " & vbCrLf
-    s = s & "foro de eleição, lei aplicável e solução de conflitos (mediação/arbitragem); " & vbCrLf
-    s = s & "validade de assinatura (inclusive eletrônica) e testemunhas; cláusulas " & vbCrLf
-    s = s & "potencialmente abusivas ou desequilibradas; e referências a anexos ou " & vbCrLf
-    s = s & "documentos citados mas ausentes do texto." & vbCrLf & vbCrLf
-    s = s & "Responda SEMPRE em português do Brasil, em TEXTO PURO (sem markdown, sem " & vbCrLf
-    s = s & "JSON), seguindo EXATAMENTE este formato de marcadores, sem nenhum texto antes " & vbCrLf
-    s = s & "do primeiro marcador ou depois do último:" & vbCrLf & vbCrLf
-    s = s & "##RESUMO_PARTES##" & vbCrLf
-    s = s & "(texto sobre as partes do contrato)" & vbCrLf
-    s = s & "##RESUMO_OBJETO##" & vbCrLf
-    s = s & "(texto sobre o objeto do contrato)" & vbCrLf
-    s = s & "##RESUMO_VALOR##" & vbCrLf
-    s = s & "(texto sobre valor e forma de pagamento)" & vbCrLf
-    s = s & "##RESUMO_PRAZO##" & vbCrLf
-    s = s & "(texto sobre prazo e vigência)" & vbCrLf
-    s = s & "##PONTO_INICIO##" & vbCrLf
-    s = s & "TITULO: (título curto do ponto)" & vbCrLf
-    s = s & "CATEGORIA: (ex.: Rescisão, LGPD, Multas, Foro)" & vbCrLf
-    s = s & "GRAVIDADE: (Alta, Média ou Baixa)" & vbCrLf
-    s = s & "TRECHO: (cláusula/trecho relevante, ou ""ausente no contrato"" - uma única linha)" & vbCrLf
-    s = s & "PROBLEMA: (explicação do risco ou lacuna - uma única linha)" & vbCrLf
-    s = s & "SUGESTAO: (sugestão de ajuste - uma única linha)" & vbCrLf
-    s = s & "##PONTO_FIM##" & vbCrLf
-    s = s & "(repita o bloco ##PONTO_INICIO##/##PONTO_FIM## para cada ponto encontrado, do " & vbCrLf
-    s = s & "de maior para o de menor gravidade; não crie pontos artificiais)" & vbCrLf
-    s = s & "##CONCLUSAO##" & vbCrLf
-    s = s & "(avaliação geral e recomendação de prioridade de revisão)" & vbCrLf
-    s = s & "##FIM##" & vbCrLf & vbCrLf
-    s = s & "IMPORTANTE: dentro de cada bloco PONTO, cada campo (TITULO, CATEGORIA, " & vbCrLf
-    s = s & "GRAVIDADE, TRECHO, PROBLEMA, SUGESTAO) deve ficar em uma única linha, sem " & vbCrLf
-    s = s & "quebras de linha no meio do valor."
-    GerarSystemPrompt = s
-End Function
-
-Private Function GerarUserPrompt(nomeArquivo As String, textoContrato As String) As String
-    Dim s As String
-    s = "Segue abaixo o texto integral do contrato extraído do arquivo """ & nomeArquivo & """. "
-    s = s & "Faça a análise conforme as instruções e responda apenas com os marcadores pedidos." & vbCrLf & vbCrLf
-    s = s & "--- INÍCIO DO CONTRATO ---" & vbCrLf
-    s = s & textoContrato & vbCrLf
-    s = s & "--- FIM DO CONTRATO ---"
-    GerarUserPrompt = s
-End Function
-
-
-' ---------------------------------------------------------------------
-' Parsing da resposta (marcadores) e montagem do documento de saída
+' Parsing da análise (marcadores) e montagem do documento de saída
 ' ---------------------------------------------------------------------
 Private Function MontarRelatorio(doc As Document, analiseTexto As String, nomeArquivoOrigem As String) As Long
     Dim rng As Range
@@ -590,9 +406,10 @@ Private Function MontarRelatorio(doc As Document, analiseTexto As String, nomeAr
     Escreve rng, ValorAposMarcador(analiseTexto, "##CONCLUSAO##"), quebraDepois:=True
 
     Escreve rng, "", quebraDepois:=True
-    Escreve rng, "Este documento é gerado automaticamente por IA e tem caráter apenas " & _
-        "informativo/preparatório. Recomenda-se revisão por um advogado antes de " & _
-        "qualquer decisão.", italico:=True, tamanho:=9
+    Escreve rng, "Este documento é gerado automaticamente por um checklist de regras " & _
+        "(busca por palavras-chave, sem uso de IA) e tem caráter apenas informativo/" & _
+        "preparatório - pode haver falsos positivos e falsos negativos. Recomenda-se " & _
+        "revisão por um advogado antes de qualquer decisão.", italico:=True, tamanho:=9
 
     MontarRelatorio = qtdPontos
 End Function

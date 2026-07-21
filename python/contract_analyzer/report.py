@@ -53,9 +53,10 @@ def build_report(analysis: dict, source_filename: str, output_path: str) -> None
     document.add_paragraph()
     aviso = document.add_paragraph()
     aviso_run = aviso.add_run(
-        "Este documento é gerado automaticamente por IA e tem caráter apenas "
-        "informativo/preparatório. Recomenda-se revisão por um advogado antes "
-        "de qualquer decisão."
+        "Este documento é gerado automaticamente por um checklist de regras "
+        "(busca por palavras-chave, sem uso de IA) e tem caráter apenas "
+        "informativo/preparatório - pode haver falsos positivos e falsos "
+        "negativos. Recomenda-se revisão por um advogado antes de qualquer decisão."
     )
     aviso_run.italic = True
     aviso_run.font.size = Pt(9)
