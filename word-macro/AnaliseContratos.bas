@@ -173,11 +173,7 @@ Private Function ChamarClaudeAPI(apiKey As String, nomeArquivo As String, textoC
     caminhoRequest = pastaTemp & "/request.json"
     caminhoResponse = pastaTemp & "/response.json"
 
-    Dim nFile As Integer
-    nFile = FreeFile
-    Open caminhoRequest For Output As #nFile
-    Print #nFile, jsonBody
-    Close #nFile
+    EscreverArquivoUtf8 caminhoRequest, jsonBody
 
     ' "-w '%{http_code}'" faz o curl devolver o status HTTP como saída do
     ' "do shell script" (o corpo da resposta vai para o arquivo via -o).
@@ -194,7 +190,7 @@ Private Function ChamarClaudeAPI(apiKey As String, nomeArquivo As String, textoC
     statusCode = MacScript(comandoAS)
 
     Dim respostaTexto As String
-    respostaTexto = LerArquivoTexto(caminhoResponse)
+    respostaTexto = LerArquivoUtf8(caminhoResponse)
 
     On Error Resume Next
     Kill caminhoRequest
@@ -221,16 +217,129 @@ Private Function ChamarClaudeAPI(apiKey As String, nomeArquivo As String, textoC
     ChamarClaudeAPI = conteudo
 End Function
 
-Private Function LerArquivoTexto(caminho As String) As String
-    Dim nFile As Integer, linha As String, resultado As String
+' Grava/lê arquivos em UTF-8 usando E/S BINÁRIA + um codec UTF-8 escrito à
+' mão (funções Utf8Encode/Utf8Decode logo abaixo), em vez de "Open ... For
+' Output"/"Print #"/"Line Input #" em modo texto. Isso é necessário porque
+' o modo texto do VBA no Word para Mac usa a codificação legada MacRoman
+' (não UTF-8) para ler/gravar, o que corrompe qualquer acentuação e chega
+' a gerar bytes inválidos o suficiente para a API rejeitar a requisição
+' com "not valid UTF-8". E/S binária com Byte() não sofre essa conversão.
+Private Sub EscreverArquivoUtf8(caminho As String, conteudo As String)
+    Dim bytes() As Byte
+    bytes = Utf8Encode(conteudo)
+
+    Dim nFile As Integer
     nFile = FreeFile
-    Open caminho For Input As #nFile
-    Do While Not EOF(nFile)
-        Line Input #nFile, linha
-        resultado = resultado & linha & vbLf
-    Loop
+    Open caminho For Binary Access Write As #nFile
+    Put #nFile, 1, bytes
     Close #nFile
-    LerArquivoTexto = resultado
+End Sub
+
+Private Function LerArquivoUtf8(caminho As String) As String
+    Dim tamanho As Long
+    tamanho = FileLen(caminho)
+    If tamanho = 0 Then
+        LerArquivoUtf8 = ""
+        Exit Function
+    End If
+
+    Dim bytes() As Byte
+    ReDim bytes(tamanho - 1)
+
+    Dim nFile As Integer
+    nFile = FreeFile
+    Open caminho For Binary Access Read As #nFile
+    Get #nFile, 1, bytes
+    Close #nFile
+
+    LerArquivoUtf8 = Utf8Decode(bytes)
+End Function
+
+' Codifica uma String do VBA (UTF-16 internamente) para um array de bytes UTF-8.
+Private Function Utf8Encode(ByVal texto As String) As Byte()
+    Dim resultado() As Byte
+    ReDim resultado(Len(texto) * 4 - 1) ' pior caso: 4 bytes por caractere
+
+    Dim posSaida As Long
+    posSaida = 0
+
+    Dim i As Long, codigo As Long, codigoBaixo As Long, codigoCompleto As Long
+    i = 1
+    Do While i <= Len(texto)
+        codigo = AscW(Mid(texto, i, 1))
+        If codigo < 0 Then codigo = codigo + 65536 ' AscW é assinado; desfaz o sinal
+
+        If codigo <= &H7F Then
+            resultado(posSaida) = codigo
+            posSaida = posSaida + 1
+        ElseIf codigo <= &H7FF Then
+            resultado(posSaida) = &HC0 Or (codigo \ &H40)
+            resultado(posSaida + 1) = &H80 Or (codigo And &H3F)
+            posSaida = posSaida + 2
+        ElseIf codigo >= &HD800 And codigo <= &HDBFF And i < Len(texto) Then
+            ' par substituto (surrogate pair) - caractere fora do BMP (ex.: emoji)
+            i = i + 1
+            codigoBaixo = AscW(Mid(texto, i, 1))
+            If codigoBaixo < 0 Then codigoBaixo = codigoBaixo + 65536
+            codigoCompleto = &H10000 + ((codigo - &HD800) * &H400) + (codigoBaixo - &HDC00)
+            resultado(posSaida) = &HF0 Or (codigoCompleto \ &H40000)
+            resultado(posSaida + 1) = &H80 Or ((codigoCompleto \ &H1000) And &H3F)
+            resultado(posSaida + 2) = &H80 Or ((codigoCompleto \ &H40) And &H3F)
+            resultado(posSaida + 3) = &H80 Or (codigoCompleto And &H3F)
+            posSaida = posSaida + 4
+        Else
+            resultado(posSaida) = &HE0 Or (codigo \ &H1000)
+            resultado(posSaida + 1) = &H80 Or ((codigo \ &H40) And &H3F)
+            resultado(posSaida + 2) = &H80 Or (codigo And &H3F)
+            posSaida = posSaida + 3
+        End If
+        i = i + 1
+    Loop
+
+    If posSaida = 0 Then
+        Utf8Encode = resultado ' string vazia
+    Else
+        ReDim Preserve resultado(posSaida - 1)
+        Utf8Encode = resultado
+    End If
+End Function
+
+' Decodifica um array de bytes UTF-8 de volta para uma String do VBA.
+Private Function Utf8Decode(ByRef bytes() As Byte) As String
+    Dim resultado As String
+    Dim i As Long, fim As Long
+    Dim b0 As Long, b1 As Long, b2 As Long, b3 As Long, codigo As Long
+
+    i = LBound(bytes)
+    fim = UBound(bytes)
+
+    Do While i <= fim
+        b0 = bytes(i)
+        If b0 < &H80 Then
+            resultado = resultado & Chr(b0)
+            i = i + 1
+        ElseIf (b0 And &HE0) = &HC0 And i + 1 <= fim Then
+            b1 = bytes(i + 1)
+            codigo = ((b0 And &H1F) * &H40) Or (b1 And &H3F)
+            resultado = resultado & ChrW(codigo)
+            i = i + 2
+        ElseIf (b0 And &HF0) = &HE0 And i + 2 <= fim Then
+            b1 = bytes(i + 1): b2 = bytes(i + 2)
+            codigo = ((b0 And &HF) * &H1000) Or ((b1 And &H3F) * &H40) Or (b2 And &H3F)
+            resultado = resultado & ChrW(codigo)
+            i = i + 3
+        ElseIf (b0 And &HF8) = &HF0 And i + 3 <= fim Then
+            b1 = bytes(i + 1): b2 = bytes(i + 2): b3 = bytes(i + 3)
+            codigo = ((b0 And &H7) * &H40000) Or ((b1 And &H3F) * &H1000) Or ((b2 And &H3F) * &H40) Or (b3 And &H3F)
+            codigo = codigo - &H10000
+            resultado = resultado & ChrW(&HD800 Or (codigo \ &H400)) & ChrW(&HDC00 Or (codigo And &H3FF))
+            i = i + 4
+        Else
+            i = i + 1 ' byte inválido/incompleto - ignora
+        End If
+    Loop
+
+    Utf8Decode = resultado
 End Function
 
 #Else
